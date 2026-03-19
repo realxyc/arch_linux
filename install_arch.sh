@@ -38,7 +38,26 @@ do
     esac
 done
 
+# ==========================================
+# 2. AUTO-DETECT CREDENTIAL TYPE
+# ==========================================
 CREDS_PATH="$(pwd)/user_credentials.json"
+DEC_KEY=""
+
+# Peek at the first character of the file
+FIRST_CHAR=$(head -c 1 "$CREDS_PATH")
+
+if [ "$FIRST_CHAR" == "{" ]; then
+    echo "🔓 Plain-text JSON detected. Skipping passphrase."
+else
+    echo "🔐 Encrypted credentials detected (AES blob)."
+    # -s hides the password as you type
+    read -s -p "Enter the Credentials Passphrase: " CREDS_PASS
+    echo -e "\n✅ Passphrase captured."
+    
+    # Store the argument for archinstall
+    DEC_KEY="--creds-decryption-key $CREDS_PASS"
+fi
 
 # ==========================================
 # 2. DRIVE SELECTION
@@ -64,9 +83,6 @@ EFI_SIZE=${INPUT_EFI:-1G}
 read -p "Root Partition Size (e.g., 500G, 200G) [Default: 500G]: " INPUT_ROOT
 ROOT_SIZE=${INPUT_ROOT:-500G}
 
-CONFIG_FILE="user_configuration.json"
-CREDS_FILE="user_credentials.json"
-
 # ==========================================
 # 3. THE FINAL SUMMARY
 # ==========================================
@@ -85,8 +101,8 @@ echo "  1. Create EFI:  $EFI_SIZE (Type: FAT32, Label: EFI_BOOT)"
 echo "  2. Create Root: $ROOT_SIZE (Type: EXT4, Label: LINUX_ROOT)"
 echo "-------------------------------------------------"
 echo "CONFIGURATION FILES:"
-echo "  - Settings:     $CONFIG_FILE"
-echo "  - Credentials:  $CREDS_FILE"
+echo "  - Settings:     $CONFIG_PATH"
+echo "  - Credentials:  $CREDS_PATH"
 echo "================================================="
 echo "CURRENT DRIVE LAYOUT (Verify your Windows partition!):"
 lsblk -o NAME,SIZE,FSTYPE,PARTLABEL "$DISK"
@@ -146,16 +162,15 @@ mount "$PART_EFI" /mnt/boot
 # ==========================================
 # 6. ARCHINSTALL
 # ==========================================
-echo "Invoking archinstall silently with saved configuration and credentials..."
+echo "Invoking archinstall with selected user config and creds..."
 
-if [[ ! -f "$CONFIG_FILE" || ! -f "$CREDS_FILE" ]]; then
-    echo "Error: $CONFIG_FILE or $CREDS_FILE not found in the current directory!"
+if [[ ! -f "$CONFIG_PATH" || ! -f "$CREDS_PATH" ]]; then
+    echo "Error: $CONFIG_PATH or $CREDS_PATH not found in the current directory!"
     umount -R /mnt
     exit 1
 fi
 
-# The --silent flag ensures it doesn't pause to ask about chrooting
-archinstall --config "$CONFIG_FILE" --creds "$CREDS_FILE" --mountpoint /mnt --silent
+archinstall --config "$CONFIG_PATH" --creds "$CREDS_PATH" $DEC_KEY --mountpoint /mnt --silent
 
 # ==========================================
 # 7. POST-INSTALL VERIFICATION & CHROOT
