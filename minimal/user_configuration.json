@@ -5,14 +5,23 @@
         },
         "bluetooth_config": {
             "enabled": true
+        },
+        "firewall_config": {
+            "firewall": "firewalld"
+        },
+        "power_management_config": {
+            "power_management": "power-profiles-daemon"
+        },
+        "print_service_config": {
+            "enabled": true
         }
     },
-    "archinstall-language": "English",
+    "archinstall_language": "English",
     "auth_config": {},
     "bootloader_config": {
-        "bootloader": "Grub",
-        "removable": true,
-        "uki": false
+        "bootloader": "Refind",
+        "removable": false,
+        "uki": true
     },
     "custom_commands": [],
     "disk_config": {
@@ -24,6 +33,7 @@
         "linux"
     ],
     "locale_config": {
+        "console_font": "default8x16",
         "kb_layout": "us",
         "sys_enc": "UTF-8",
         "sys_lang": "en_US.UTF-8"
@@ -36,13 +46,17 @@
         "btop",
         "curl",
         "fastfetch",
-        "nano",
-        "wget",
-        "git",
         "fuse3",
-        "ntfs-3g"
+        "git",
+        "github-cli",
+        "nano",
+        "ntfs-3g",
+        "wget"
     ],
-    "parallel_downloads": 0,
+    "pacman_config": {
+        "color": true,
+        "parallel_downloads": 5
+    },
     "profile_config": {
         "gfx_driver": null,
         "greeter": null,
@@ -59,5 +73,5 @@
         "enabled": true
     },
     "timezone": "Asia/Kolkata",
-    "version": "3.0.15"
+    "version": "4.4"
 }
