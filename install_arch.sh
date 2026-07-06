@@ -39,28 +39,71 @@ do
 done
 
 # ==========================================
-# 2. AUTO-DETECT CREDENTIAL TYPE
+# 2. CREDENTIAL CREATION & JSON GENERATION
 # ==========================================
-CREDS_PATH="$(pwd)/user_credentials.json"
-DEC_KEY=""
+echo -e "\n================================================="
+echo "           USER CREDENTIALS SETUP                "
+echo "================================================="
 
-# Peek at the first character of the file
-FIRST_CHAR=$(head -c 1 "$CREDS_PATH")
+# Get Root Password
+read -s -p "Enter Root Password: " ROOT_PASS
+echo
+read -s -p "Confirm Root Password: " ROOT_PASS_CONFIRM
+echo
+if [ "$ROOT_PASS" != "$ROOT_PASS_CONFIRM" ]; then
+    echo "Error: Root passwords do not match! Exiting."
+    exit 1
+fi
+# Hash the root password securely
+ROOT_HASH=$(openssl passwd -6 "$ROOT_PASS")
 
-if [ "$FIRST_CHAR" == "{" ]; then
-    echo "🔓 Plain-text JSON detected. Skipping passphrase."
+echo "-------------------------------------------------"
+
+# Get User Details
+read -p "Enter new username: " USERNAME
+
+read -s -p "Enter password for $USERNAME: " USER_PASS
+echo
+read -s -p "Confirm password for $USERNAME: " USER_PASS_CONFIRM
+echo
+if [ "$USER_PASS" != "$USER_PASS_CONFIRM" ]; then
+    echo "Error: User passwords do not match! Exiting."
+    exit 1
+fi
+# Hash the user password securely
+USER_HASH=$(openssl passwd -6 "$USER_PASS")
+
+echo "-------------------------------------------------"
+
+# Get Sudo Preference
+read -p "Give $USERNAME sudo privileges? (y/n): " SUDO_INPUT
+if [[ "$SUDO_INPUT" =~ ^[Yy] ]]; then
+    SUDO_BOOL="true"
 else
-    echo "🔐 Encrypted credentials detected (AES blob)."
-    # -s hides the password as you type
-    read -s -p "Enter the Credentials Passphrase: " CREDS_PASS
-    echo -e "\n✅ Passphrase captured."
-    
-    # Store the argument for archinstall
-    DEC_KEY="--creds-decryption-key $CREDS_PASS"
+    SUDO_BOOL="false"
 fi
 
+# Write the file securely with hashes
+CREDS_PATH="$(pwd)/user_credentials.json"
+cat > "$CREDS_PATH" <<EOF
+{
+  "root_enc_password": "$ROOT_HASH",
+  "users": [
+    {
+      "enc_password": "$USER_HASH",
+      "groups": [],
+      "sudo": $SUDO_BOOL,
+      "username": "$USERNAME"
+    }
+  ]
+}
+EOF
+
+echo -e "\n✅ user_credentials.json generated securely with hashed passwords."
+DEC_KEY="" # Decryption key arg is empty since we are using plain-text JSON structure
+
 # ==========================================
-# 2. DRIVE SELECTION
+# 3. DRIVE SELECTION
 # ==========================================
 echo -e "\nScanning for available drives...\n"
 lsblk -d -p -n -o NAME,SIZE,MODEL | grep -v "loop"
@@ -84,7 +127,7 @@ read -p "Root Partition Size (e.g., 500G, 200G) [Default: 500G]: " INPUT_ROOT
 ROOT_SIZE=${INPUT_ROOT:-500G}
 
 # ==========================================
-# 3. THE FINAL SUMMARY
+# 4. THE FINAL SUMMARY & VISUAL VERIFICATION
 # ==========================================
 clear 
 
@@ -103,6 +146,12 @@ echo "-------------------------------------------------"
 echo "CONFIGURATION FILES:"
 echo "  - Settings:     $CONFIG_PATH"
 echo "  - Credentials:  $CREDS_PATH"
+echo "-------------------------------------------------"
+echo "CREDENTIALS VERIFICATION (Please Review!):"
+echo "  - Username:        $USERNAME"
+echo "  - User Password:   $USER_PASS"
+echo "  - Sudo Privileges: $SUDO_BOOL"
+echo "  - Root Password:   $ROOT_PASS"
 echo "================================================="
 echo "CURRENT DRIVE LAYOUT (Verify your Windows partition!):"
 lsblk -o NAME,SIZE,FSTYPE,PARTLABEL "$DISK"
@@ -110,7 +159,7 @@ echo "================================================="
 
 echo -e "\nPOINT OF NO RETURN"
 echo "This script will carve out the planned partitions from the UNALLOCATED free space on $DISK."
-read -p "Are you absolutely sure? Type 'YES' in all caps to proceed: " CONFIRM
+read -p "Are you absolutely sure everything above is correct? Type 'YES' in all caps to proceed: " CONFIRM
 
 if [ "$CONFIRM" != "YES" ]; then
     echo "Installation aborted by user. Your disks have not been touched."
@@ -120,14 +169,13 @@ fi
 echo "Safety check passed. Commencing installation..."
 
 # ==========================================
-# 3. UPDATE PACMAN & KEYRING
+# 5. UPDATE PACMAN & KEYRING
 # ==========================================
 echo "Updating pacman, keyring, and installing archinstall..."
-#pacman -Syu --noconfirm
 pacman -Sy --noconfirm archlinux-keyring archinstall
 
 # ==========================================
-# 4. PARTITIONING (Targeting Free Space)
+# 6. PARTITIONING (Targeting Free Space)
 # ==========================================
 echo "Carving out ${EFI_SIZE} EFI and ${ROOT_SIZE} Root from free space on $DISK..."
 
@@ -148,7 +196,7 @@ echo "EFI Partition created at: $PART_EFI"
 echo "ROOT Partition created at: $PART_ROOT"
 
 # ==========================================
-# 5. FORMATTING & MOUNTING
+# 7. FORMATTING & MOUNTING
 # ==========================================
 echo "Formatting partitions..."
 mkfs.fat -F 32 "$PART_EFI"
@@ -160,7 +208,7 @@ mkdir /mnt/boot
 mount "$PART_EFI" /mnt/boot
 
 # ==========================================
-# 6. ARCHINSTALL
+# 8. ARCHINSTALL
 # ==========================================
 echo "Invoking archinstall with selected user config and creds..."
 
@@ -173,7 +221,7 @@ fi
 archinstall --config "$CONFIG_PATH" --creds "$CREDS_PATH" $DEC_KEY --mountpoint /mnt --silent
 
 # ==========================================
-# 7. POST-INSTALL VERIFICATION & CHROOT
+# 9. POST-INSTALL VERIFICATION & CHROOT
 # ==========================================
 echo "Verifying fstab was generated successfully by archinstall..."
 cat /mnt/etc/fstab
@@ -199,7 +247,7 @@ grub-mkconfig -o /boot/grub/grub.cfg
 EOF
 
 # ==========================================
-# 8. CLEANUP
+# 10. CLEANUP
 # ==========================================
 echo "Unmounting and finishing up..."
 umount -R /mnt
