@@ -7,13 +7,13 @@ echo "================================================="
 echo "     Welcome to Arch Linux Hybrid Installer      "
 echo "================================================="
 
-# 0. UEFI check
+# 0. UEFI PRE-FLIGHT CHECK
 if [ ! -d /sys/firmware/efi ]; then
-    echo "Error: System is not booted in UEFI mode. This script targets UEFI/GRUB dual-boot. Aborting."
+    echo "Error: System is not booted in UEFI mode. This script targets UEFI dual-boot. Aborting."
     exit 1
 fi
 
-# 1. drive selection
+# 1. DRIVE SELECTION
 echo -e "\nScanning for available drives...\n"
 lsblk -d -p -n -o NAME,SIZE,MODEL | grep -v "loop"
 echo "-------------------------------------------------"
@@ -29,12 +29,36 @@ DRIVE_MODEL=$(lsblk -d -n -o MODEL "$DISK")
 DRIVE_SIZE=$(lsblk -d -n -o SIZE "$DISK")
 
 echo "-------------------------------------------------"
-echo "Current free space regions on $DISK:"
+echo "Current drive layout on $DISK (verify your Windows partitions!):"
+lsblk -o NAME,SIZE,FSTYPE,PARTLABEL,PARTTYPE "$DISK"
+echo "-------------------------------------------------"
+
+# 2. LOCATE EXISTING WINDOWS ESP
+# We do NOT create a second EFI partition. Windows already has one, and
+# systemd-boot/UEFI firmware expect a single ESP per disk for reliable
+# dual-boot detection. We reuse it and just mount it, never format it.
+echo "Searching for existing EFI System Partition on $DISK..."
+
+ESP_TYPE_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+PART_ESP=$(lsblk -rno NAME,PARTTYPE "$DISK" | awk -v guid="$ESP_TYPE_GUID" \
+    'tolower($2)==guid {print $1; exit}')
+
+if [[ -z "$PART_ESP" ]]; then
+    echo "Error: No existing EFI System Partition found on $DISK."
+    echo "If this is genuinely a fresh disk with no Windows install, create"
+    echo "an ESP manually first — this script intentionally will not do it"
+    echo "for you to avoid ending up with a stray, unused ESP."
+    exit 1
+fi
+PART_ESP="/dev/$PART_ESP"
+echo "Found existing ESP: $PART_ESP (will be reused, not reformatted)"
+echo "-------------------------------------------------"
+
+# 3. FREE SPACE CHECK FOR ROOT PARTITION
+echo "Free space regions on $DISK:"
 parted -s "$DISK" unit MiB print free || { echo "Error: parted could not read $DISK. Aborting."; exit 1; }
 echo "-------------------------------------------------"
 
-# Find the largest contiguous "Free Space" region (in MiB) so we can validate
-# the requested EFI + Root sizes actually fit before touching the disk.
 LARGEST_FREE_MIB=$(parted -s "$DISK" unit MiB print free \
     | awk '/Free Space/ {gsub("MiB","",$3); if ($3+0 > max) max=$3+0} END {print max+0}')
 
@@ -44,18 +68,11 @@ if [[ -z "$LARGEST_FREE_MIB" || "$LARGEST_FREE_MIB" == "0" ]]; then
 fi
 
 echo "Largest contiguous free region: ${LARGEST_FREE_MIB} MiB"
-echo "-------------------------------------------------"
+read -p "Root Partition Size (e.g., 200G, 500G) [Default: 200G]: " INPUT_ROOT
+ROOT_SIZE=${INPUT_ROOT:-200G}
 
-read -p "EFI Partition Size (e.g., 1G, 512M) [Default: 1G]: " INPUT_EFI
-EFI_SIZE=${INPUT_EFI:-1G}
-
-read -p "Root Partition Size (e.g., 500G, 200G) [Default: 500G]: " INPUT_ROOT
-ROOT_SIZE=${INPUT_ROOT:-500G}
-
-# Convert human sizes (G/M suffix) to MiB for comparison against free space.
 size_to_mib() {
-    local size="$1"
-    local num unit
+    local size="$1" num unit
     num=$(echo "$size" | sed -E 's/([0-9.]+).*/\1/')
     unit=$(echo "$size" | sed -E 's/[0-9.]+([A-Za-z]*)/\1/' | tr '[:lower:]' '[:upper:]')
     case "$unit" in
@@ -65,24 +82,16 @@ size_to_mib() {
     esac
 }
 
-EFI_SIZE_MIB=$(size_to_mib "$EFI_SIZE")
 ROOT_SIZE_MIB=$(size_to_mib "$ROOT_SIZE")
-REQUIRED_MIB=$(( EFI_SIZE_MIB + ROOT_SIZE_MIB ))
-
-echo "Requested total: ${REQUIRED_MIB} MiB (EFI: ${EFI_SIZE_MIB} MiB + Root: ${ROOT_SIZE_MIB} MiB)"
-
-if (( REQUIRED_MIB > LARGEST_FREE_MIB )); then
-    echo "Error: Requested EFI+Root (${REQUIRED_MIB} MiB) exceeds the largest"
-    echo "contiguous free region (${LARGEST_FREE_MIB} MiB) on $DISK."
-    echo "Shrink your requested sizes, free up more space, or pick a different disk. Aborting."
+if (( ROOT_SIZE_MIB > LARGEST_FREE_MIB )); then
+    echo "Error: Requested Root size (${ROOT_SIZE_MIB} MiB) exceeds the largest"
+    echo "contiguous free region (${LARGEST_FREE_MIB} MiB) on $DISK. Aborting."
     exit 1
 fi
+echo "Requested root size fits within available free space."
 
-echo "✅ Requested sizes fit within available free space."
-
-# 2. summary
+# 4. FINAL SUMMARY & CONFIRMATION
 clear
-
 echo "================================================="
 echo "       FINAL PARTITIONING SUMMARY        "
 echo "================================================="
@@ -91,89 +100,77 @@ echo "  Drive Path:     $DISK"
 echo "  Drive Model:    $DRIVE_MODEL"
 echo "  Total Size:     $DRIVE_SIZE"
 echo "-------------------------------------------------"
-echo "PLANNED ACTIONS (In Unallocated Space):"
-echo "  1. Create EFI:  $EFI_SIZE (Type: FAT32, Label: EFI_BOOT)"
-echo "  2. Create Root: $ROOT_SIZE (Type: EXT4, Label: LINUX_ROOT)"
+echo "PLANNED ACTIONS:"
+echo "  1. Reuse existing ESP: $PART_ESP  (mounted at /mnt/boot, NOT formatted)"
+echo "  2. Create new Root:    $ROOT_SIZE (Type: EXT4, Label: LINUX_ROOT, in free space)"
 echo "-------------------------------------------------"
 echo "AFTER PARTITIONING:"
-echo "  - archinstall will launch interactively."
-echo "  - Point its disk configuration step at the pre-mounted"
-echo "    /mnt (and /mnt/boot) target instead of re-partitioning."
-echo "  - After archinstall finishes, this script resumes to"
-echo "    handle GRUB + os-prober dual-boot finalization."
+echo "  - archinstall will launch interactively, pointed at the pre-mounted"
+echo "    /mnt target instead of re-partitioning."
+echo "  - Choose 'systemd-boot' as the bootloader inside archinstall."
+echo "  - This script performs NO bootloader installation of its own —"
+echo "    archinstall's own choice is final, nothing overwrites it."
 echo "================================================="
-echo "CURRENT DRIVE LAYOUT (Verify your Windows partition!):"
 lsblk -o NAME,SIZE,FSTYPE,PARTLABEL "$DISK"
 echo "================================================="
 
 echo -e "\nPOINT OF NO RETURN"
-echo "This script will carve out the planned partitions from the UNALLOCATED free space on $DISK."
 read -p "Are you absolutely sure everything above is correct? Type 'YES' in all caps to proceed: " CONFIRM
-
 if [ "$CONFIRM" != "YES" ]; then
     echo "Installation aborted by user. Your disks have not been touched."
     exit 1
 fi
-
 echo "Safety check passed. Commencing partitioning..."
 
-# 3. partitioning (targeting free space)
-echo "Carving out ${EFI_SIZE} EFI and ${ROOT_SIZE} Root from free space on $DISK..."
-
-sgdisk -n 0:0:+"$EFI_SIZE" -t 0:ef00 -c 0:"EFI_BOOT" "$DISK"
+# 5. PARTITIONING (root only — free space)
+echo "Carving out ${ROOT_SIZE} Root from free space on $DISK..."
 sgdisk -n 0:0:+"$ROOT_SIZE" -t 0:8300 -c 0:"LINUX_ROOT" "$DISK"
 
 echo "Syncing partition tables..."
 partprobe "$DISK"
 udevadm settle
 
-PART_EFI_NAME=$(lsblk -o NAME,PARTLABEL -rn "$DISK" | grep "EFI_BOOT" | awk '{print $1}')
 PART_ROOT_NAME=$(lsblk -o NAME,PARTLABEL -rn "$DISK" | grep "LINUX_ROOT" | awk '{print $1}')
-
-if [[ -z "$PART_EFI_NAME" || -z "$PART_ROOT_NAME" ]]; then
-    echo "Error: Could not locate newly created partitions by label on $DISK. Aborting."
+if [[ -z "$PART_ROOT_NAME" ]]; then
+    echo "Error: Could not locate newly created root partition by label on $DISK. Aborting."
     exit 1
 fi
-
-PART_EFI="/dev/$PART_EFI_NAME"
 PART_ROOT="/dev/$PART_ROOT_NAME"
-
-echo "EFI Partition created at: $PART_EFI"
 echo "ROOT Partition created at: $PART_ROOT"
 
-# 4. FORMATTING & MOUNTING
-echo "Formatting partitions..."
-mkfs.fat -F 32 "$PART_EFI"
+# 6. FORMAT ROOT + MOUNT (ESP is reused, never formatted)
+echo "Formatting root partition..."
 mkfs.ext4 -F "$PART_ROOT"
 
 echo "Mounting partitions..."
 mount "$PART_ROOT" /mnt
 mkdir -p /mnt/boot
-mount "$PART_EFI" /mnt/boot
+mount "$PART_ESP" /mnt/boot
 
 mountpoint -q /mnt || { echo "Error: /mnt not mounted, aborting."; exit 1; }
 mountpoint -q /mnt/boot || { echo "Error: /mnt/boot not mounted, aborting."; exit 1; }
 
-echo -e "\n✅ Partitions ready and mounted at /mnt and /mnt/boot."
+echo -e "\n✅ Partitions ready: root fresh, ESP reused untouched, both mounted."
 
-# 5. update pacman and open archinstall (yeah it's interactive)
+# 7. UPDATE PACMAN & LAUNCH ARCHINSTALL (INTERACTIVE)
 echo "Updating pacman, keyring, and installing archinstall..."
 pacman -Sy --noconfirm archlinux-keyring archinstall
 
 echo "-------------------------------------------------"
 echo "Launching archinstall interactively."
-echo "IMPORTANT: In the disk configuration step, choose the option"
-echo "to use the already-mounted target (/mnt) rather than letting"
-echo "archinstall re-partition $DISK — it is already partitioned."
-echo "Set the mountpoint used by archinstall to: /mnt"
+echo "IMPORTANT in the archinstall menu:"
+echo "  - Disk configuration: use the pre-mounted /mnt target, do NOT let"
+echo "    archinstall repartition $DISK — it's already partitioned."
+echo "  - Bootloader: choose systemd-boot (not GRUB)."
+echo "  - If offered, choose UKI as the kernel image type."
 echo "-------------------------------------------------"
 read -p "Press Enter to launch archinstall..." _
 
 archinstall --mountpoint /mnt
 
-echo -e "\narchinstall has exited. Resuming script for finalization..."
+echo -e "\narchinstall has exited. Resuming script for verification..."
 
-# 6. post-install verification
+# 8. POST-INSTALL VERIFICATION
 echo "Verifying fstab was generated successfully by archinstall..."
 if [ ! -f /mnt/etc/fstab ]; then
     echo "Error: /mnt/etc/fstab not found. archinstall may not have completed successfully. Aborting."
@@ -182,33 +179,26 @@ fi
 cat /mnt/etc/fstab
 echo "-------------------------------------------------"
 
-# 7. chroot: to check grub installation
-echo "Entering chroot to finalize system..."
-
-arch-chroot /mnt /bin/bash <<'EOF'
-set -e
-
-echo "Fixing Windows dual-boot hardware clock sync..."
-hwclock --systohc --localtime
-
-echo "Installing bootloader dependencies..."
-pacman -S --noconfirm grub efibootmgr os-prober dosfstools mtools
-
-echo "Enabling os-prober to detect Windows..."
-if grep -q "^GRUB_DISABLE_OS_PROBER=" /etc/default/grub; then
-    sed -i 's/^GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/' /etc/default/grub
+# Make sure the NVMe driver is actually in whatever image archinstall built —
+# this is the exact check that would have caught the earlier kernel panic
+# (missing nvme module in the initramfs/UKI) before ever rebooting.
+echo "Checking that the nvme module is present in the installed kernel image..."
+UKI_FILE=$(find /mnt/boot -iname "*.efi" 2>/dev/null | head -n1)
+if [[ -n "$UKI_FILE" ]] && arch-chroot /mnt which lsinitcpio &>/dev/null; then
+    if ! arch-chroot /mnt lsinitcpio "${UKI_FILE#/mnt}" 2>/dev/null | grep -q "nvme"; then
+        echo "WARNING: nvme module not found in $UKI_FILE."
+        echo "Adding it and regenerating to prevent a boot-time panic..."
+        arch-chroot /mnt sed -i 's/^MODULES=(\(.*\))/MODULES=(\1 nvme)/' /etc/mkinitcpio.conf
+        arch-chroot /mnt mkinitcpio -P
+    else
+        echo "nvme module present — good."
+    fi
 else
-    echo "GRUB_DISABLE_OS_PROBER=false" >> /etc/default/grub
+    echo "Could not verify automatically (non-UKI setup or lsinitcpio unavailable)."
+    echo "Manually confirm 'nvme' is in MODULES=() in /mnt/etc/mkinitcpio.conf if this is an NVMe drive."
 fi
 
-echo "Installing GRUB bootloader..."
-grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=GRUB
-
-echo "Generating GRUB config..."
-grub-mkconfig -o /boot/grub/grub.cfg
-EOF
-
-# 8. CLEANUP
+# 9. CLEANUP
 echo "Unmounting and finishing up..."
 umount -R /mnt
-echo "Installation completely automated and finished! You can now type 'reboot'."
+echo "Installation finished! You can now type 'reboot'."
